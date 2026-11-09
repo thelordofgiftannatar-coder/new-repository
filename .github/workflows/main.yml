@@ -46,8 +46,21 @@ jobs:
             target="work/res/${f#./}"
             mkdir -p "$(dirname "$target")"
             cp "android-res/$f" "$target"
-          done < <(cd android-res && find . -type f \( -name '*.png' -o -name '*.xml' \))
-          cp android-res/values/strings.xml work/res/values/strings.xml
+          done < <(cd android-res && find . -type f -name '*.png')
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          new = ET.parse('android-res/values/strings.xml').getroot()
+          p = 'work/res/values/strings.xml'
+          tree = ET.parse(p)
+          root = tree.getroot()
+          for s in new.findall('string'):
+              hit = root.find("string[@name='%s']" % s.get('name'))
+              if hit is None:
+                  hit = ET.SubElement(root, 'string')
+                  hit.set('name', s.get('name'))
+              hit.text = s.text
+          tree.write(p, encoding='utf-8', xml_declaration=True)
+          PY
       - name: Rebuild APK
         run: java -jar apktool.jar b work -o unsigned.apk
       - name: Align and sign APK
@@ -61,4 +74,21 @@ jobs:
           if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.jks
             KS_PASS="$ANDROID_KEYSTORE_PASSWORD"
-            KEY_ALIAS="
+            KEY_ALIAS="${ANDROID_KEY_ALIAS:-gotham}"
+            KEY_PASS="${ANDROID_KEY_PASSWORD:-$KS_PASS}"
+          else
+            echo "::warning::No persistent Android signing secrets configured; using a temporary key. Future APK builds will not install as in-place updates."
+            keytool -genkeypair -v -keystore release.jks -storepass gothamtemp -keypass gothamtemp -alias gotham -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Gotham gazette, OU=Android, O=Gotham gazette, L=Unknown, S=Unknown, C=US"
+            KS_PASS=gothamtemp
+            KEY_ALIAS=gotham
+            KEY_PASS=gothamtemp
+          fi
+          "$BT/zipalign" -f -p 4 unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASS" --out GothamGazette.apk aligned.apk
+          "$BT/apksigner" verify GothamGazette.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gotham-Gazette-Android-APK
+          path: GothamGazette.apk
+          if-no-files-found: error
+          retention-days: 30
